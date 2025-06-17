@@ -54,7 +54,6 @@
         let animationFrameId;
         let currentFrameIndex = -1;
         
-        // This array will hold the state of the screen's pixels, avoiding slow canvas reads.
         let pixelState = new Uint8ClampedArray(TOTAL_PIXELS * 4);
 
         function setup() {
@@ -68,7 +67,8 @@
                 drawNoDataMessage("NO FRAME DATA", "Is frame_data.js present?");
                 playPauseBtn.disabled = true;
             } else {
-                drawFrame(0);
+                rebuildPixelStateTo(0);
+                drawPixelState();
                 updateUI();
             }
         }
@@ -87,17 +87,31 @@
         function animationLoop() {
             if (typeof compressedFrames === 'undefined') return;
             const targetFrame = Math.floor(audio.currentTime * FPS);
-            if (targetFrame !== currentFrameIndex && targetFrame < compressedFrames.length) {
-                if(targetFrame === currentFrameIndex + 1) {
-                    drawFrame(targetFrame);
+
+            if (targetFrame > currentFrameIndex && targetFrame < compressedFrames.length) {
+                // This logic ensures smooth playback and corrects itself if frames are skipped.
+                if (targetFrame === currentFrameIndex + 1) {
+                    applyDeltaToPixelState(compressedFrames[targetFrame].data);
                 } else {
-                    rebuildFrameTo(targetFrame);
+                    rebuildPixelStateTo(targetFrame);
                 }
+                drawPixelState();
                 currentFrameIndex = targetFrame;
+            } else if (targetFrame < currentFrameIndex) {
+                 // Handles looping or seeking backwards
+                 rebuildPixelStateTo(targetFrame);
+                 drawPixelState();
+                 currentFrameIndex = targetFrame;
             }
+            
             if (!audio.paused) {
                  animationFrameId = requestAnimationFrame(animationLoop);
             }
+        }
+        
+        function drawPixelState() {
+            const imageData = new ImageData(pixelState, CANVAS_WIDTH, CANVAS_HEIGHT);
+            ctx.putImageData(imageData, 0, 0);
         }
 
         function drawNoDataMessage(line1, line2) {
@@ -109,32 +123,16 @@
             ctx.fillText(line2, CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 + 10);
         }
 
-        function drawFrame(frameIndex) {
-            if (frameIndex < 0 || frameIndex >= compressedFrames.length) return;
-            const frameInfo = compressedFrames[frameIndex];
-            if (!frameInfo) return;
-
-            if (frameInfo.type === 'k') {
-                buildRleFrame(frameInfo.data); // Directly modifies pixelState
-            } else if (frameInfo.type === 'd') {
-                applyDeltaToPixelState(frameInfo.data); // Directly modifies pixelState
-            }
-            
-            // Draw the final result to the visible canvas in one go.
-            const imageData = new ImageData(pixelState, CANVAS_WIDTH, CANVAS_HEIGHT);
-            ctx.putImageData(imageData, 0, 0);
-        }
-
         function buildRleFrame(rleData) {
-            let i = 0; // Index for the pixelState array
+            let i = 0;
             let colorIndex = 0;
             for (const runLength of rleData) {
                 const colorVal = colorIndex === 0 ? 0 : 255;
                 for (let j = 0; j < runLength; j++) {
-                    pixelState[i] = colorVal;     // R
-                    pixelState[i + 1] = colorVal; // G
-                    pixelState[i + 2] = colorVal; // B
-                    pixelState[i + 3] = 255;      // A
+                    pixelState[i] = colorVal;
+                    pixelState[i + 1] = colorVal;
+                    pixelState[i + 2] = colorVal;
+                    pixelState[i + 3] = 255;
                     i += 4;
                 }
                 colorIndex = 1 - colorIndex;
@@ -151,7 +149,7 @@
                 for (let i = 0; i < byteData.length; i += 3) {
                     const index = (byteData[i] << 16) | (byteData[i+1] << 8) | byteData[i+2];
                     const pixelIndex = index * 4;
-                    const colorVal = pixelState[pixelIndex] === 0 ? 255 : 0; // Flip color
+                    const colorVal = pixelState[pixelIndex] === 0 ? 255 : 0;
                     pixelState[pixelIndex] = colorVal;
                     pixelState[pixelIndex + 1] = colorVal;
                     pixelState[pixelIndex + 2] = colorVal;
@@ -185,8 +183,9 @@
             audio.currentTime = percentage * audio.duration;
         }
 
-        function rebuildFrameTo(targetFrameIndex) {
-            if (targetFrameIndex < 0) return;
+        function rebuildPixelStateTo(targetFrameIndex) {
+            if (targetFrameIndex < 0 || targetFrameIndex >= compressedFrames.length) return;
+            
             let lastKeyFrameIndex = 0;
             for (let i = targetFrameIndex; i >= 0; i--) {
                 if (compressedFrames[i] && compressedFrames[i].type === 'k') {
@@ -194,15 +193,18 @@
                     break;
                 }
             }
-            // Build the keyframe first
-            buildRleFrame(compressedFrames[lastKeyFrameIndex].data);
             
-            // Then apply all subsequent delta frames
+            const keyFrameInfo = compressedFrames[lastKeyFrameIndex];
+            if (keyFrameInfo.type === 'k') {
+                 buildRleFrame(keyFrameInfo.data);
+            }
+            
             for (let i = lastKeyFrameIndex + 1; i <= targetFrameIndex; i++) {
-                if (compressedFrames[i].type === 'd') {
-                    applyDeltaToPixelState(compressedFrames[i].data);
-                } else { // Should not happen often, but handle if another keyframe is found
-                    buildRleFrame(compressedFrames[i].data);
+                 const frameInfo = compressedFrames[i];
+                 if (frameInfo.type === 'd') {
+                    applyDeltaToPixelState(frameInfo.data);
+                } else if (frameInfo.type === 'k') {
+                    buildRleFrame(frameInfo.data);
                 }
             }
         }
