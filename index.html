@@ -41,6 +41,7 @@
         const CANVAS_WIDTH = 512;
         const CANVAS_HEIGHT = 384;
         const FPS = 30;
+        const TOTAL_PIXELS = CANVAS_WIDTH * CANVAS_HEIGHT;
 
         const canvas = document.getElementById('badAppleCanvas');
         const ctx = canvas.getContext('2d');
@@ -53,10 +54,8 @@
         let animationFrameId;
         let currentFrameIndex = -1;
         
-        const backBuffer = document.createElement('canvas');
-        backBuffer.width = CANVAS_WIDTH;
-        backBuffer.height = CANVAS_HEIGHT;
-        const backCtx = backBuffer.getContext('2d');
+        // This array will hold the state of the screen's pixels, avoiding slow canvas reads.
+        let pixelState = new Uint8ClampedArray(TOTAL_PIXELS * 4);
 
         function setup() {
             canvas.width = CANVAS_WIDTH;
@@ -88,22 +87,14 @@
         function animationLoop() {
             if (typeof compressedFrames === 'undefined') return;
             const targetFrame = Math.floor(audio.currentTime * FPS);
-
-            // This condition is the core logic. It decides if we need to draw a new frame.
             if (targetFrame !== currentFrameIndex && targetFrame < compressedFrames.length) {
-                // If we're just moving to the next frame, we can apply the delta efficiently.
-                if (targetFrame === currentFrameIndex + 1) {
+                if(targetFrame === currentFrameIndex + 1) {
                     drawFrame(targetFrame);
                 } else {
-                    // If we've jumped frames (e.g., after seeking or due to lag),
-                    // we must rebuild the frame from the last keyframe.
                     rebuildFrameTo(targetFrame);
                 }
-                // CRITICAL FIX: Update the currentFrameIndex AFTER drawing.
                 currentFrameIndex = targetFrame;
             }
-            
-            // Continue the loop if the audio is still playing.
             if (!audio.paused) {
                  animationFrameId = requestAnimationFrame(animationLoop);
             }
@@ -123,38 +114,35 @@
             const frameInfo = compressedFrames[frameIndex];
             if (!frameInfo) return;
 
-            if (frameInfo.type === 'k') { // 'k' for keyframe
-                drawRleFrame(frameInfo.data, backCtx);
-            } else if (frameInfo.type === 'd') { // 'd' for delta
-                drawDeltaFrameOptimized(frameInfo.data, backCtx);
+            if (frameInfo.type === 'k') {
+                buildRleFrame(frameInfo.data); // Directly modifies pixelState
+            } else if (frameInfo.type === 'd') {
+                applyDeltaToPixelState(frameInfo.data); // Directly modifies pixelState
             }
             
-            // Copy the result to the visible canvas
-            ctx.drawImage(backBuffer, 0, 0);
+            // Draw the final result to the visible canvas in one go.
+            const imageData = new ImageData(pixelState, CANVAS_WIDTH, CANVAS_HEIGHT);
+            ctx.putImageData(imageData, 0, 0);
         }
 
-        function drawRleFrame(rleData, context) {
-            let x = 0, y = 0, colorIndex = 0;
-            context.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+        function buildRleFrame(rleData) {
+            let i = 0; // Index for the pixelState array
+            let colorIndex = 0;
             for (const runLength of rleData) {
-                if (runLength === 0) { colorIndex = 1 - colorIndex; continue; }
-                context.fillStyle = colorIndex === 0 ? 'black' : 'white';
-                let remainingInRun = runLength;
-                while (remainingInRun > 0) {
-                    const printableLength = Math.min(remainingInRun, CANVAS_WIDTH - x);
-                    if (printableLength > 0) context.fillRect(x, y, printableLength, 1);
-                    x += printableLength;
-                    remainingInRun -= printableLength;
-                    if (x >= CANVAS_WIDTH) { x = 0; y++; }
+                const colorVal = colorIndex === 0 ? 0 : 255;
+                for (let j = 0; j < runLength; j++) {
+                    pixelState[i] = colorVal;     // R
+                    pixelState[i + 1] = colorVal; // G
+                    pixelState[i + 2] = colorVal; // B
+                    pixelState[i + 3] = 255;      // A
+                    i += 4;
                 }
                 colorIndex = 1 - colorIndex;
             }
         }
-
-        function drawDeltaFrameOptimized(b64Data, context) {
+        
+        function applyDeltaToPixelState(b64Data) {
             try {
-                const imageData = context.getImageData(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
-                const pixels = imageData.data;
                 const decodedString = atob(b64Data);
                 const byteData = new Uint8Array(decodedString.length);
                 for (let i = 0; i < decodedString.length; i++) {
@@ -163,14 +151,13 @@
                 for (let i = 0; i < byteData.length; i += 3) {
                     const index = (byteData[i] << 16) | (byteData[i+1] << 8) | byteData[i+2];
                     const pixelIndex = index * 4;
-                    const colorVal = pixels[pixelIndex] === 0 ? 255 : 0;
-                    pixels[pixelIndex] = colorVal;
-                    pixels[pixelIndex + 1] = colorVal;
-                    pixels[pixelIndex + 2] = colorVal;
+                    const colorVal = pixelState[pixelIndex] === 0 ? 255 : 0; // Flip color
+                    pixelState[pixelIndex] = colorVal;
+                    pixelState[pixelIndex + 1] = colorVal;
+                    pixelState[pixelIndex + 2] = colorVal;
                 }
-                context.putImageData(imageData, 0, 0);
             } catch (e) {
-                console.error("Failed to decode or draw delta frame:", e);
+                console.error("Failed to decode or apply delta frame:", e);
             }
         }
         
@@ -195,9 +182,7 @@
             const bounds = progressContainer.getBoundingClientRect();
             const clickPosition = event.clientX - bounds.left;
             const percentage = Math.max(0, Math.min(1, clickPosition / bounds.width));
-            const newTime = percentage * audio.duration;
-            audio.currentTime = newTime;
-            // The main animation loop will handle the redraw. No need to call rebuildFrameTo here.
+            audio.currentTime = percentage * audio.duration;
         }
 
         function rebuildFrameTo(targetFrameIndex) {
@@ -209,9 +194,16 @@
                     break;
                 }
             }
-            drawFrame(lastKeyFrameIndex);
+            // Build the keyframe first
+            buildRleFrame(compressedFrames[lastKeyFrameIndex].data);
+            
+            // Then apply all subsequent delta frames
             for (let i = lastKeyFrameIndex + 1; i <= targetFrameIndex; i++) {
-                drawFrame(i);
+                if (compressedFrames[i].type === 'd') {
+                    applyDeltaToPixelState(compressedFrames[i].data);
+                } else { // Should not happen often, but handle if another keyframe is found
+                    buildRleFrame(compressedFrames[i].data);
+                }
             }
         }
         
