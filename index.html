@@ -38,8 +38,8 @@
     <script src="frame_data.js"></script>
     
     <script>
-        const CANVAS_WIDTH = 96;
-        const CANVAS_HEIGHT = 72;
+        const CANVAS_WIDTH = 512;
+        const CANVAS_HEIGHT = 384;
         const FPS = 30;
 
         const canvas = document.getElementById('badAppleCanvas');
@@ -51,6 +51,11 @@
         const frameCounter = document.getElementById('frameCounter');
 
         let animationFrameId;
+        // This off-screen canvas will hold the state of the previous frame
+        const backBuffer = document.createElement('canvas');
+        backBuffer.width = CANVAS_WIDTH;
+        backBuffer.height = CANVAS_HEIGHT;
+        const backCtx = backBuffer.getContext('2d');
 
         function setup() {
             canvas.width = CANVAS_WIDTH;
@@ -65,7 +70,7 @@
                 drawNoDataMessage("NO FRAME DATA", "Is frame_data.js present?");
                 playPauseBtn.disabled = true;
             } else {
-                drawRleFrame(compressedFrames[0]);
+                drawFrame(0); // Draw the initial keyframe
                 updateUI();
             }
         }
@@ -85,11 +90,11 @@
         function animationLoop() {
             if (typeof compressedFrames === 'undefined') return;
             const targetFrame = Math.floor(audio.currentTime * FPS);
-
-            if (compressedFrames.length > 0 && targetFrame < compressedFrames.length) {
-                drawRleFrame(compressedFrames[targetFrame]);
+            
+            if (targetFrame < compressedFrames.length) {
+                drawFrame(targetFrame);
             }
-
+            
             if (!audio.paused) {
                  animationFrameId = requestAnimationFrame(animationLoop);
             }
@@ -100,31 +105,44 @@
             ctx.fillStyle = 'white';
             ctx.textAlign = 'center';
             ctx.font = '14px VT323';
-            ctx.fillText(line1, CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 - 5);
-            ctx.fillText(line2, CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 + 15);
+            ctx.fillText(line1, CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 - 10);
+            ctx.fillText(line2, CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 + 10);
         }
 
-        function drawRleFrame(rleData) {
-            if (!rleData) return;
+        function drawFrame(frameIndex) {
+            const frameInfo = compressedFrames[frameIndex];
+            if (!frameInfo) return;
+
+            if (frameInfo.type === 'key') {
+                // Draw a full keyframe using RLE
+                drawRleFrame(frameInfo.data, backCtx);
+            } else if (frameInfo.type === 'delta') {
+                // Apply changes to the previous frame's data
+                drawDeltaFrame(frameInfo.data, backCtx);
+            }
             
+            // Copy the updated back buffer to the visible canvas
+            ctx.drawImage(backBuffer, 0, 0);
+        }
+
+        function drawRleFrame(rleData, context) {
+            if (!rleData) return;
             let x = 0;
             let y = 0;
             let colorIndex = 0;
-            ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+            context.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
 
             for (const runLength of rleData) {
                 if (runLength === 0) {
                      colorIndex = 1 - colorIndex;
                      continue;
                 }
-                
-                ctx.fillStyle = colorIndex === 0 ? 'black' : 'white';
-                
+                context.fillStyle = colorIndex === 0 ? 'black' : 'white';
                 let remainingInRun = runLength;
                 while (remainingInRun > 0) {
                     const printableLength = Math.min(remainingInRun, CANVAS_WIDTH - x);
                     if (printableLength > 0) {
-                         ctx.fillRect(x, y, printableLength, 1);
+                         context.fillRect(x, y, printableLength, 1);
                     }
                     x += printableLength;
                     remainingInRun -= printableLength;
@@ -136,20 +154,26 @@
                 colorIndex = 1 - colorIndex;
             }
         }
+
+        function drawDeltaFrame(deltaData, context) {
+            if (!deltaData) return;
+            // The magic: we just flip the color of the changed pixels
+            for (const [y, x] of deltaData) {
+                const pixel = context.getImageData(x, y, 1, 1).data;
+                // If it was black (or transparent), make it white. Otherwise, make it black.
+                context.fillStyle = (pixel[0] === 0) ? 'white' : 'black';
+                context.fillRect(x, y, 1, 1);
+            }
+        }
         
         function togglePlayPause() {
             if (audio.paused) {
-                // The play() command itself will trigger the browser to load the audio
                 const playPromise = audio.play();
                 if (playPromise !== undefined) {
                     playPromise.then(() => {
-                        // Playback started
                         playPauseBtn.textContent = 'Pause';
                         animationFrameId = requestAnimationFrame(animationLoop);
-                    }).catch(error => {
-                        handleAudioError();
-                        console.error("Playback failed:", error);
-                    });
+                    }).catch(handleAudioError);
                 }
             } else {
                 audio.pause();
@@ -159,14 +183,32 @@
         }
 
         function handleSeek(event) {
-             if (!audio.duration) return; // Can't seek if we don't know the duration
-            
+            if (!audio.duration) return;
             const bounds = progressContainer.getBoundingClientRect();
             const clickPosition = event.clientX - bounds.left;
             const percentage = Math.max(0, Math.min(1, clickPosition / bounds.width));
 
             audio.currentTime = percentage * audio.duration;
-            animationLoop();
+            // To seek, we must rebuild the frame from the start
+            rebuildFrameTo(Math.floor(audio.currentTime * FPS));
+        }
+
+        function rebuildFrameTo(targetFrameIndex) {
+            // Find the last keyframe before our target
+            let lastKeyFrameIndex = 0;
+            for (let i = targetFrameIndex; i >= 0; i--) {
+                if (compressedFrames[i].type === 'key') {
+                    lastKeyFrameIndex = i;
+                    break;
+                }
+            }
+            // Draw that keyframe first
+            drawFrame(lastKeyFrameIndex);
+
+            // Now apply all delta changes from that keyframe up to our target
+            for (let i = lastKeyFrameIndex + 1; i <= targetFrameIndex; i++) {
+                drawFrame(i);
+            }
         }
         
         function updateUI() {
@@ -184,7 +226,6 @@
         playPauseBtn.addEventListener('click', togglePlayPause);
         progressContainer.addEventListener('click', handleSeek);
         
-        // Use window.onload to ensure all files, including frame_data.js, are loaded
         window.addEventListener('load', setup);
     </script>
 
