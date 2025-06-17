@@ -24,11 +24,10 @@
         
         <canvas id="badAppleCanvas" class="w-full aspect-video mx-auto"></canvas>
 
-        <!-- The audio source now points to the MP3 file in your repository -->
-        <audio id="badAppleAudio" src="badapple.mp3" preload="auto"></audio>
+        <audio id="badAppleAudio" src="badapple.mp3" preload="metadata"></audio>
 
         <div class="mt-6 flex flex-col sm:flex-row items-center justify-center gap-4 w-full">
-            <button id="playPauseBtn" class="btn w-full sm:w-auto" disabled>Loading...</button>
+            <button id="playPauseBtn" class="btn w-full sm:w-auto">Play</button>
             <div id="progressContainer" class="progress-bar-container w-full sm:w-1/2">
                 <div id="progressBar" class="progress-bar"></div>
             </div>
@@ -36,10 +35,8 @@
         </div>
     </div>
 
-    <!-- The frame data is now loaded from a separate file -->
     <script src="frame_data.js"></script>
     
-    <!-- This is the main player script -->
     <script>
         const CANVAS_WIDTH = 96;
         const CANVAS_HEIGHT = 72;
@@ -59,25 +56,20 @@
             canvas.width = CANVAS_WIDTH;
             canvas.height = CANVAS_HEIGHT;
 
-            audio.addEventListener('loadeddata', handleAudioReady);
             audio.addEventListener('error', handleAudioError);
             audio.addEventListener('timeupdate', updateUI);
             audio.addEventListener('ended', handleAudioEnded);
+            audio.addEventListener('loadeddata', updateUI);
             
-            // Check if frame data was loaded correctly from frame_data.js
             if (typeof compressedFrames === 'undefined' || compressedFrames.length === 0) {
-                drawNoDataMessage("NO FRAME DATA", "Did you create frame_data.js?");
+                drawNoDataMessage("NO FRAME DATA", "Is frame_data.js present?");
+                playPauseBtn.disabled = true;
             } else {
                 drawRleFrame(compressedFrames[0]);
+                updateUI();
             }
         }
         
-        function handleAudioReady() {
-            playPauseBtn.disabled = false;
-            playPauseBtn.textContent = 'Play';
-            updateUI();
-        }
-
         function handleAudioError() {
             playPauseBtn.disabled = true;
             playPauseBtn.textContent = 'Audio Error';
@@ -146,12 +138,19 @@
         }
         
         function togglePlayPause() {
-            if (audio.readyState < 2) return;
-
             if (audio.paused) {
-                audio.play().catch(handleAudioError);
-                playPauseBtn.textContent = 'Pause';
-                animationFrameId = requestAnimationFrame(animationLoop);
+                // The play() command itself will trigger the browser to load the audio
+                const playPromise = audio.play();
+                if (playPromise !== undefined) {
+                    playPromise.then(() => {
+                        // Playback started
+                        playPauseBtn.textContent = 'Pause';
+                        animationFrameId = requestAnimationFrame(animationLoop);
+                    }).catch(error => {
+                        handleAudioError();
+                        console.error("Playback failed:", error);
+                    });
+                }
             } else {
                 audio.pause();
                 playPauseBtn.textContent = 'Play';
@@ -160,7 +159,7 @@
         }
 
         function handleSeek(event) {
-             if (audio.readyState < 2) return;
+             if (!audio.duration) return; // Can't seek if we don't know the duration
             
             const bounds = progressContainer.getBoundingClientRect();
             const clickPosition = event.clientX - bounds.left;
@@ -173,7 +172,7 @@
         function updateUI() {
             if (typeof compressedFrames === 'undefined') return;
             const frameCount = compressedFrames.length > 0 ? compressedFrames.length : 0;
-            const currentDisplayFrame = Math.floor(audio.currentTime * FPS);
+            const currentDisplayFrame = audio.currentTime ? Math.floor(audio.currentTime * FPS) : 0;
             frameCounter.textContent = `Frame: ${currentDisplayFrame} / ${frameCount}`;
 
             if (audio.duration) {
@@ -185,7 +184,8 @@
         playPauseBtn.addEventListener('click', togglePlayPause);
         progressContainer.addEventListener('click', handleSeek);
         
-        document.addEventListener('DOMContentLoaded', setup);
+        // Use window.onload to ensure all files, including frame_data.js, are loaded
+        window.addEventListener('load', setup);
     </script>
 
 </body>
