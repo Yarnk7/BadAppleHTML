@@ -62,17 +62,20 @@
             audio.addEventListener('error', handleAudioError);
             audio.addEventListener('timeupdate', updateUI);
             audio.addEventListener('ended', handleAudioEnded);
-            audio.addEventListener('loadeddata', updateUI);
+            audio.addEventListener('canplay', handleAudioReady); // Use 'canplay' for better mobile compatibility
+            
             if (typeof compressedFrames === 'undefined' || compressedFrames.length === 0) {
                 drawNoDataMessage("NO FRAME DATA", "Is frame_data.js present?");
                 playPauseBtn.disabled = true;
             } else {
-                rebuildPixelStateTo(0);
-                drawPixelState();
-                updateUI();
+                updateUI(); // Initial UI update
             }
         }
         
+        function handleAudioReady() {
+            updateUI();
+        }
+
         function handleAudioError() {
             playPauseBtn.disabled = true;
             playPauseBtn.textContent = 'Audio Error';
@@ -84,26 +87,22 @@
             cancelAnimationFrame(animationFrameId);
         }
 
+        // --- NEW, ROBUST ANIMATION LOGIC ---
         function animationLoop() {
-            if (audio.paused || typeof compressedFrames === 'undefined') {
+            if (audio.paused) {
                 cancelAnimationFrame(animationFrameId);
                 return;
             }
             
             const targetFrame = Math.floor(audio.currentTime * FPS);
 
-            if (targetFrame > currentFrameIndex && targetFrame < compressedFrames.length) {
-                // This logic is much more robust for catching up on skipped frames
-                while (currentFrameIndex < targetFrame) {
-                    currentFrameIndex++;
-                    const frameInfo = compressedFrames[currentFrameIndex];
-                    if (frameInfo.type === 'd') {
-                        applyDeltaToPixelState(frameInfo.data);
-                    } else if (frameInfo.type === 'k') {
-                        buildRleFrame(frameInfo.data);
-                    }
-                }
+            // Only redraw if the frame index has actually changed.
+            if (targetFrame !== currentFrameIndex && targetFrame < compressedFrames.length) {
+                // This is the single point of truth for drawing.
+                // It always rebuilds from the last keyframe to ensure perfect sync.
+                rebuildPixelStateTo(targetFrame);
                 drawPixelState();
+                currentFrameIndex = targetFrame;
             }
             
             animationFrameId = requestAnimationFrame(animationLoop);
@@ -165,6 +164,7 @@
                 if (playPromise !== undefined) {
                     playPromise.then(() => {
                         playPauseBtn.textContent = 'Pause';
+                        // The loop is started from a clean state.
                         animationFrameId = requestAnimationFrame(animationLoop);
                     }).catch(handleAudioError);
                 }
@@ -180,14 +180,9 @@
             const bounds = progressContainer.getBoundingClientRect();
             const clickPosition = event.clientX - bounds.left;
             const percentage = Math.max(0, Math.min(1, clickPosition / bounds.width));
-            const newTime = percentage * audio.duration;
-            audio.currentTime = newTime;
-
-            // After setting the time, immediately rebuild and draw to prevent flicker
-            const targetFrame = Math.floor(newTime * FPS);
-            rebuildPixelStateTo(targetFrame);
-            drawPixelState();
-            currentFrameIndex = targetFrame;
+            audio.currentTime = percentage * audio.duration;
+            
+            // The animationLoop will automatically handle the redraw on its next cycle.
         }
 
         function rebuildPixelStateTo(targetFrameIndex) {
