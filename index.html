@@ -88,14 +88,22 @@
         function animationLoop() {
             if (typeof compressedFrames === 'undefined') return;
             const targetFrame = Math.floor(audio.currentTime * FPS);
+
+            // This condition is the core logic. It decides if we need to draw a new frame.
             if (targetFrame !== currentFrameIndex && targetFrame < compressedFrames.length) {
-                if(targetFrame === currentFrameIndex + 1) {
+                // If we're just moving to the next frame, we can apply the delta efficiently.
+                if (targetFrame === currentFrameIndex + 1) {
                     drawFrame(targetFrame);
                 } else {
+                    // If we've jumped frames (e.g., after seeking or due to lag),
+                    // we must rebuild the frame from the last keyframe.
                     rebuildFrameTo(targetFrame);
                 }
+                // CRITICAL FIX: Update the currentFrameIndex AFTER drawing.
                 currentFrameIndex = targetFrame;
             }
+            
+            // Continue the loop if the audio is still playing.
             if (!audio.paused) {
                  animationFrameId = requestAnimationFrame(animationLoop);
             }
@@ -111,13 +119,17 @@
         }
 
         function drawFrame(frameIndex) {
+            if (frameIndex < 0 || frameIndex >= compressedFrames.length) return;
             const frameInfo = compressedFrames[frameIndex];
             if (!frameInfo) return;
-            if (frameInfo.type === 'k') {
+
+            if (frameInfo.type === 'k') { // 'k' for keyframe
                 drawRleFrame(frameInfo.data, backCtx);
-            } else if (frameInfo.type === 'd') {
+            } else if (frameInfo.type === 'd') { // 'd' for delta
                 drawDeltaFrameOptimized(frameInfo.data, backCtx);
             }
+            
+            // Copy the result to the visible canvas
             ctx.drawImage(backBuffer, 0, 0);
         }
 
@@ -139,41 +151,24 @@
             }
         }
 
-        // --- OPTIMIZED DELTA DRAWING FUNCTION ---
         function drawDeltaFrameOptimized(b64Data, context) {
             try {
-                // Get all pixel data from the canvas at once
                 const imageData = context.getImageData(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
                 const pixels = imageData.data;
-
-                // Decode the Base64 string into a byte array
                 const decodedString = atob(b64Data);
                 const byteData = new Uint8Array(decodedString.length);
                 for (let i = 0; i < decodedString.length; i++) {
                     byteData[i] = decodedString.charCodeAt(i);
                 }
-
-                // Loop through the byte array to get the changed pixel indices
                 for (let i = 0; i < byteData.length; i += 3) {
                     const index = (byteData[i] << 16) | (byteData[i+1] << 8) | byteData[i+2];
-                    const pixelIndex = index * 4; // Each pixel is 4 bytes (R,G,B,A)
-                    
-                    // Flip the color in the pixel data array
-                    if (pixels[pixelIndex] === 0) { // If it's black...
-                        pixels[pixelIndex] = 255;     // R
-                        pixels[pixelIndex + 1] = 255; // G
-                        pixels[pixelIndex + 2] = 255; // B
-                    } else { // If it's white...
-                        pixels[pixelIndex] = 0;       // R
-                        pixels[pixelIndex + 1] = 0;   // G
-                        pixels[pixelIndex + 2] = 0;   // B
-                    }
-                    // Alpha (pixelIndex + 3) is always 255 (opaque)
+                    const pixelIndex = index * 4;
+                    const colorVal = pixels[pixelIndex] === 0 ? 255 : 0;
+                    pixels[pixelIndex] = colorVal;
+                    pixels[pixelIndex + 1] = colorVal;
+                    pixels[pixelIndex + 2] = colorVal;
                 }
-
-                // Put the modified pixel data back onto the canvas at once
                 context.putImageData(imageData, 0, 0);
-
             } catch (e) {
                 console.error("Failed to decode or draw delta frame:", e);
             }
@@ -202,16 +197,14 @@
             const percentage = Math.max(0, Math.min(1, clickPosition / bounds.width));
             const newTime = percentage * audio.duration;
             audio.currentTime = newTime;
-            const targetFrame = Math.floor(newTime * FPS);
-            rebuildFrameTo(targetFrame);
-            currentFrameIndex = targetFrame;
+            // The main animation loop will handle the redraw. No need to call rebuildFrameTo here.
         }
 
         function rebuildFrameTo(targetFrameIndex) {
             if (targetFrameIndex < 0) return;
             let lastKeyFrameIndex = 0;
             for (let i = targetFrameIndex; i >= 0; i--) {
-                if (compressedFrames[i].type === 'k') {
+                if (compressedFrames[i] && compressedFrames[i].type === 'k') {
                     lastKeyFrameIndex = i;
                     break;
                 }
